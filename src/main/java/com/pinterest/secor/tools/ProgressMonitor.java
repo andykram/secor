@@ -21,36 +21,48 @@ import com.pinterest.secor.common.SecorConfig;
 import com.pinterest.secor.common.TopicPartition;
 import com.pinterest.secor.common.ZookeeperConnector;
 import com.pinterest.secor.message.Message;
-import com.pinterest.secor.parser.ThriftMessageParser;
+import com.pinterest.secor.parser.MessageParser;
+import com.pinterest.secor.parser.TimestampedMessageParser;
+import com.pinterest.secor.util.ReflectionUtil;
+import com.pinterest.secor.util.StatsUtil;
 import net.minidev.json.JSONObject;
 import net.minidev.json.JSONValue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static java.lang.String.format;
+
 /**
  * Progress monitor exports offset lags per topic partition.
  *
  * @author Pawel Garbacki (pawel@pinterest.com)
  */
-public class ProgressMonitor {
+public class ProgressMonitor extends Thread {
     private static final Logger LOG = LoggerFactory.getLogger(ProgressMonitor.class);
     private SecorConfig mConfig;
     private ZookeeperConnector mZookeeperConnector;
     private KafkaClient mKafkaClient;
-    private ThriftMessageParser mThriftMessageParser;
+    private MessageParser mMessageParser;
 
-    public ProgressMonitor(SecorConfig config) {
+    public ProgressMonitor(SecorConfig config)
+            throws Exception
+    {
         mConfig = config;
         mZookeeperConnector = new ZookeeperConnector(mConfig);
         mKafkaClient = new KafkaClient(mConfig);
-        mThriftMessageParser = new ThriftMessageParser(mConfig);
+        mMessageParser = (MessageParser) ReflectionUtil.createMessageParser(
+                mConfig.getMessageParserClass(), mConfig);
     }
 
     private void makeRequest(String body) throws IOException {
@@ -110,7 +122,29 @@ public class ProgressMonitor {
         makeRequest(bodyJson.toString());
     }
 
-    public void exportStats() throws Exception {
+    @Override
+    public void run()
+    {
+        try {
+            if (mConfig.getRunProgressMonitorAsService()) {
+                while (true) {
+                    exportStats();
+                    Thread.sleep(mConfig.getProgressServiceInterval());
+                }
+            }
+            else {
+                exportStats();
+            }
+        }
+        catch (InterruptedException e) {
+            throw new RuntimeException("Thread was interrupted", e);
+        }
+        catch (Exception e) {
+            throw new RuntimeException("Thread experienced exceptional condition", e);
+        }
+    }
+
+    private void exportStats() throws Exception {
         List<String> topics = mZookeeperConnector.getCommittedOffsetTopics();
         for (String topic : topics) {
             if (topic.matches(mConfig.getTsdbBlacklistTopics()) ||
@@ -129,8 +163,10 @@ public class ProgressMonitor {
                         partition);
                 } else {
                     committedOffset = committedMessage.getOffset();
-                    committedTimestampMillis = mThriftMessageParser.extractTimestampMillis(
-                        committedMessage);
+                    if (mMessageParser instanceof TimestampedMessageParser) {
+                        committedTimestampMillis = ((TimestampedMessageParser)mMessageParser).extractTimestampMillis(
+                                committedMessage);
+                    }
                 }
 
                 Message lastMessage = mKafkaClient.getLastMessage(topicPartition);
@@ -138,18 +174,30 @@ public class ProgressMonitor {
                     LOG.warn("no message found in topic " + topic + " partition " + partition);
                 } else {
                     long lastOffset = lastMessage.getOffset();
-                    long lastTimestampMillis = mThriftMessageParser.extractTimestampMillis(
-                        lastMessage);
+                    long lastTimestampMillis = -1;
+                    if (mMessageParser instanceof TimestampedMessageParser) {
+                        lastTimestampMillis = ((TimestampedMessageParser)mMessageParser).extractTimestampMillis(
+                                lastMessage);
+                    }
                     assert committedOffset <= lastOffset: Long.toString(committedOffset) + " <= " +
                         lastOffset;
                     long offsetLag = lastOffset - committedOffset;
                     long timestampMillisLag = lastTimestampMillis - committedTimestampMillis;
-                    HashMap<String, String> tags = new HashMap<String, String>();
-                    tags.put("topic", topic);
-                    tags.put("partition", Integer.toString(partition));
-                    exportToTsdb("secor.lag.offsets", tags, Long.toString(offsetLag));
-                    exportToTsdb("secor.lag.seconds", tags,
-                        Long.toString(timestampMillisLag / 1000));
+
+                    if (mConfig.getRunProgressMonitorAsService()) {
+                        StatsUtil.setLabel(format("secor.lag.offsets.topic=%s.partition=%d", topic, partition),
+                                Long.toString(offsetLag));
+                        StatsUtil.setLabel(format("secor.lag.seconds.topic=%s.partition=%d", topic, partition),
+                                Long.toString(timestampMillisLag / 1000));
+                    } else {
+                        HashMap<String, String> tags = new HashMap<String, String>();
+                        tags.put("topic", topic);
+                        tags.put("partition", Integer.toString(partition));
+                        exportToTsdb("secor.lag.offsets", tags, Long.toString(offsetLag));
+                        exportToTsdb("secor.lag.seconds", tags,
+                                Long.toString(timestampMillisLag / 1000));
+                    }
+
                     LOG.debug("topic " + topic + " partition " + partition + " committed offset " +
                         committedOffset + " last offset " + lastOffset + " committed timestamp " +
                             (committedTimestampMillis / 1000) + " last timestamp " +

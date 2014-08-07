@@ -177,6 +177,14 @@ public class SecorConfig {
         return getString("secor.compression.codec");
     }
 
+    public boolean getRunProgressMonitorAsService() {
+        return getBoolean("secor.monitor.service.enable");
+    }
+
+    public long getProgressServiceInterval() {
+        return getLong("secor.monitor.service.interval");
+    }
+
     private void checkProperty(String name) {
         if (!mProperties.containsKey(name)) {
             throw new RuntimeException("Failed to find required configuration option '" +
@@ -200,5 +208,10 @@ public class SecorConfig {
 
     private String[] getStringArray(String name) {
         return mProperties.getStringArray(name);
+    }
+
+    private boolean getBoolean(String name) {
+        checkProperty(name);
+        return mProperties.getBoolean(name);
     }
 }

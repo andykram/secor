@@ -16,6 +16,7 @@
  */
 package com.pinterest.secor.main;
 
+import com.pinterest.secor.common.OstrichAdminService;
 import com.pinterest.secor.common.SecorConfig;
 import com.pinterest.secor.tools.ProgressMonitor;
 import org.slf4j.Logger;
@@ -39,8 +40,21 @@ public class ProgressMonitorMain {
     public static void main(String[] args) {
         try {
             SecorConfig config = SecorConfig.load();
+            if (config.getRunProgressMonitorAsService()) {
+                OstrichAdminService ostrichService = new OstrichAdminService(config.getOstrichPort());
+                ostrichService.start();
+            }
             ProgressMonitor progressMonitor = new ProgressMonitor(config);
-            progressMonitor.exportStats();
+            Thread.UncaughtExceptionHandler handler = new Thread.UncaughtExceptionHandler() {
+                public void uncaughtException(Thread thread, Throwable exception) {
+                    LOG.error("Thread " + thread + " failed", exception);
+                    System.exit(1);
+                }
+            };
+            progressMonitor.start();
+            progressMonitor.setUncaughtExceptionHandler(handler);
+            progressMonitor.join();
+
         } catch (Throwable t) {
             LOG.error("Progress monitor failed", t);
             System.exit(1);
